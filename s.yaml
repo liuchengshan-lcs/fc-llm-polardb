@@ -1,0 +1,293 @@
+edition: 1.0.0
+name: fc-llm-polardb
+vars:
+  region: 'cn-hangzhou'
+  LLM_MODEL: 'chatglm2-6b-int4' # 基础模型及配置路径
+  APP_NAME: 'pg-chatglm2-6b-webui' # chatglm2-6b、app-chatglm2-6b-langchain、app-chatglm2-6b-api
+  EMBEDDING_MODLE_NAME: 'bge-large-zh' #text2vec-large-chinese
+  service:
+    name: 'fc-llm'
+    description: '将开源模型部署到函数计算'
+    role: "acs:ram::1372384345756738:role/aliyunfcdefaultrole"
+
+    nasConfig: auto
+    # logConfig: auto
+    vpcConfig: auto
+
+    internetAccess: true
+services:
+  chatglm6b-server: #容器服务
+    component: fc
+    props:
+      region: ${vars.region}
+      service: ${vars.service}
+      function:
+        handler: index.handler
+        timeout: 600
+        diskSize: 512
+        caPort: 7860
+        instanceType: fc.gpu.tesla.1
+        runtime: custom-container
+        cpu: 8
+        customContainerConfig:
+          args: ''
+          accelerationType: Default
+          image: 'registry.${vars.region}.aliyuncs.com/serverlessdevshanxie/llm:v12'
+          accelerationInfo:
+            status: Preparing
+          command: ''
+          webServerMode: true
+        instanceConcurrency: 100
+        memorySize: 32768
+        environmentVariables:
+          LLM_MODEL: ${vars.LLM_MODEL}
+
+          APP_NAME: ${vars.APP_NAME}
+
+          WEB_SERVER: gradio
+        gpuMemorySize: 16384
+        name: chatglm
+        asyncConfiguration: {}
+      triggers:
+        - name: defaultTrigger
+          description: ''
+          type: http
+          qualifier: LATEST
+          config:
+            methods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+            authType: anonymous
+            disableURLInternet: false
+
+  llm-model-download:
+    component: fc
+    actions:
+      pre-deploy:
+        - run: npm i
+          path: ./code/source-code/download-model2nas
+
+      post-deploy:
+        - component: fc ondemand put --qualifier LATEST --max 1
+        - component: fc invoke --service-name ${vars.service.name}  --function-name
+            llm-model-download
+        - component: fc nas upload -r ./code/${vars.APP_NAME}
+            /mnt/auto/llm/${vars.APP_NAME}
+          path: ./
+        - component: # chatglm2-6b-int4 | chatglm2-6b
+            fc nas upload -r ./code/${vars.LLM_MODEL}
+            /mnt/auto/llm/${vars.LLM_MODEL}
+        - component: 'fc invoke --service-name ${vars.service.name}  --function-name
+            chatglm --invocation-type async' # 模型下载完然后触发服务启动
+
+    props:
+      region: ${vars.region} # 关于变量的使用方法，可以参考：https://www.serverless-devs.com/serverless-devs/yaml#变量赋值
+      service: ${vars.service}
+      function:
+        name: "llm-model-download"
+        description: 'download model to nas'
+        codeUri: './code/source-code/download-model2nas'
+        runtime: nodejs16
+        timeout: 600
+        memorySize: 3072
+        cpu: 2.0
+        diskSize: 512
+        instanceConcurrency: 100
+        handler: index.handler
+        environmentVariables:
+          modelPath: ${vars.LLM_MODEL}
+          appPath: ${vars.APP_NAME}
+          region: ${vars.region}
+      # customDomains:
+      #   - domainName: auto
+      #     protocol: HTTP
+      #     routeConfigs:
+      #       - path: /*
+      # 
+  # chatglm-portal:
+  #   component: fc
+  #   actions:
+  #      pre-deploy:
+  #       - run: npm i
+  #         path: ./code/portal-code
+  #   props:
+  #     region: ${vars.region}
+  #     service: ${vars.service}
+  #     function:
+  #       name: chatglm-portal
+  #       description: Native recording handler
+  #       timeout: 3000
+  #       layers:
+  #         - acs:fc:cn-hangzhou:official:layers/Nodejs18/versions/1
+  #       instanceType: c1
+  #       runtime: custom.debian10
+  #       instanceConcurrency: 5
+  #       memorySize: 3072
+  #       cpu: 2.0
+  #       diskSize: 512
+  #       environmentVariables:
+  #         NODE_PATH: /opt/nodejs/node_modules
+  #         PATH: >-
+  #           /opt/nodejs18/bin::/usr/local/bin/apache-maven/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/ruby/bin:/opt/bin:/code:/code/bin
+  #         chatServerUrl: '${chatglm6b-server.output.url.custom_domain[0].domain}'
+  #         adminUrl: ${fc-nas-admin2.output.url.custom_domain[0].domain}
+  #         LLM_MODEL: ${vars.LLM_MODEL}
+  #         APP_NAME: ${vars.APP_NAME}
+  #       codeUri: ./code/portal-code
+  #       caPort: 
+  #     triggers:
+  #       - name: defaultTrigger
+  #         type: http
+  #         config:
+  #           authType: anonymous
+  #           methods:
+  #             - GET
+  #             - POST
+  #             - PUT
+  #             - DELETE
+  #             - HEAD
+  #             - OPTIONS
+  #     customDomains:
+  #       - domainName: auto
+  #         protocol: HTTP
+  #         routeConfigs:
+  #           - path: /*
+  #             serviceName: ${vars.service.name}
+  #             functionName:  chatglm-portal
+  # embedding-service:
+  #   component: fc
+  #   actions:
+  #     post-deploy: 
+  #       - component: fc nas upload -r ./code/embedding-service/model-repo '/mnt/auto/embedding'
+  #         path: ./  
+  #   props:
+  #     region: ${vars.region}
+  #     service: ${vars.service}
+  #     function:
+  #       handler: index.handler
+  #       description: embedding service
+  #       timeout: 7200
+  #       caPort: 8000
+  #       layers:
+  #         - acs:fc:cn-hangzhou:1431999136518149:layers/FastAPI-Python310/versions/1
+  #         - acs:fc:cn-hangzhou:1431999136518149:layers/NLP-Python310/versions/1
+  #       customRuntimeConfig:
+  #         command:
+  #           - python3
+  #           - '-u'
+  #           - app/main.py
+  #       instanceType: c1
+  #       runtime: custom.debian10
+  #       instanceConcurrency: 100
+  #       cpu: 8
+  #       memorySize: 32768
+  #       diskSize: 512
+  #       environmentVariables:
+  #         PATH: >-
+  #           /var/fc/lang/python3.10/bin::/usr/local/bin/apache-maven/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/ruby/bin:/opt/bin:/code:/code/bin
+  #         PYTHONPATH: /opt/python:/code
+  #         MODEL_PATH: '/mnt/auto/embedding/${vars.EMBEDDING_MODLE_NAME}'
+  #       name: 'embedding-function'
+  #       asyncConfiguration: {}
+  #       codeUri: './code/embedding-service/source-code/embedding'
+  #     triggers:
+  #       - name: httpTrigger
+  #         description: ''
+  #         type: http
+  #         config:
+  #           methods:
+  #             - GET
+  #             - POST
+  #             - PUT
+  #             - DELETE
+  #             - HEAD
+  #             - OPTIONS
+  #           authType: anonymous
+  #           disableURLInternet: false
+  #     customDomains:
+  #       - domainName: auto
+  #         protocol: HTTP
+  #         routeConfigs:
+  #           - path: /*
+  # embedding-model-download:
+  #   component: fc
+  #   actions:
+  #     pre-deploy:
+  #       - run: npm i
+  #         path: ./code/embedding-service/source-code/download-model2nas
+  #     post-deploy:
+  #       - component: fc ondemand put --qualifier LATEST --max 1
+  #       - component: fc invoke --service-name ${vars.service.name}  --function-name embedding-model-download
+  #       - component: 'fc invoke --service-name ${vars.service.name}  --function-name embedding-function --invocation-type async' # 模型下载完然后触发启动
+  #   props:
+  #     region: ${vars.region} # 关于变量的使用方法，可以参考：https://www.serverless-devs.com/serverless-devs/yaml#变量赋值
+  #     service: ${vars.service}
+  #     function:
+  #       name: 'embedding-model-download'
+  #       description: 'download embedding model to nas'
+  #       codeUri: './code/embedding-service/source-code/download-model2nas'
+  #       runtime: nodejs16
+  #       timeout: 3000
+  #       memorySize: 3072
+  #       cpu: 2.0
+  #       diskSize: 512
+  #       instanceConcurrency: 100
+  #       handler: index.handler
+  #       environmentVariables:
+  #         region: ${vars.region}
+  #         EMBEDDING_MODEL_NAME: ${vars.EMBEDDING_MODLE_NAME}
+  pgvector_llm-pgvector_llm:
+    component: fc
+    props:
+      region: ${vars.region}
+      service: ${vars.service}
+      function:
+        handler: index.handler
+        timeout: 120
+        diskSize: 512
+        caPort: 5001
+        instanceLifecycleConfig:
+          preStop:
+            handler: 'true'
+            timeout: 10
+          preFreeze:
+            handler: ''
+            timeout: 3
+        instanceType: c1
+        runtime: custom-container
+        cpu: 4
+        customContainerConfig:
+          args: ''
+          accelerationType: Default
+          image: registry.${vars.region}.aliyuncs.com/pgvector_llm/pgvector_llm:release-1.0.6
+          command: ''
+          webServerMode: true
+        instanceConcurrency: 100
+        initializer: 'true'
+        initializationTimeout: 100
+        memorySize: 4096
+        environmentVariables:
+          CHATGLM_EMBEDDING_URL: http://embedding.serverless-developer.com #${embedding-service.output.url.system_intranet_url}
+          CHATGLM_BASE_URL: ${chatglm6b-server.output.url.system_intranet_url}
+        name: pgvector_llm
+        asyncConfiguration: {}
+      triggers:
+        - name: defaultTrigger
+          description: ''
+          type: http
+          qualifier: LATEST
+          config:
+            methods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+            authType: anonymous
+            disableURLInternet: false
+      customDomains:
+        - domainName: auto
+          protocol: HTTP
+          routeConfigs:
+            - path: /*
